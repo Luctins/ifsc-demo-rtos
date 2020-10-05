@@ -101,7 +101,11 @@ void blink_task(void * message);
 
 /*--------- Globals -------*/
 static TaskHandle_t main_handle; /*!< used to set app_main's priority*/
-static xQueueHandle tcp_queue;
+
+static xQueueHandle tcp_queue_in;
+static xQueueHandle tcp_queue_out;
+static xQueueHandle * tcp_queues[2] = { &tcp_queue_in, &tcp_queue_out};
+
 char * test_argument = "Deu certo!";
 short led_state = 0;
 
@@ -122,8 +126,11 @@ void app_main(void)
     PRINT_FREE();
 
     /* cria fila de mensagens TCP */
-    tcp_queue = xQueueCreate(TCP_QUEUE_LEN, TCP_BUFF_LEN);
-    ASSERT_ERROR_A(tcp_queue == NULL, abort());
+    tcp_queue_in = xQueueCreate(TCP_QUEUE_LEN, TCP_BUFF_LEN);
+    ASSERT_ERROR_A(tcp_queue_in == NULL, abort());
+    LOGV("created tcp_queue");
+    tcp_queue_out = xQueueCreate(TCP_QUEUE_LEN, TCP_BUFF_LEN);
+    ASSERT_ERROR_A(tcp_queue_out == NULL, abort());
     LOGV("created tcp_queue");
 
     vTaskPrioritySet(main_handle, MAIN_TASK_PRIO);
@@ -137,7 +144,7 @@ void app_main(void)
     /**
        Cria task TCP e passa como argumento para ela uma fila
     */
-    xTaskCreate(tcp_server_task, "tcp_server", 4096, tcp_queue, TCP_TASK_PRIO, NULL);
+    xTaskCreate(tcp_server_task, "tcp_server", 4096, tcp_queues, TCP_TASK_PRIO, NULL);
     LOGV("created tcp_server task");
 
 
@@ -151,7 +158,7 @@ void app_main(void)
     while(1) {
         char msg_buffer[TCP_BUFF_LEN];
 
-        if (xQueueReceive(tcp_queue, msg_buffer, portMAX_DELAY) == pdPASS ) {
+        if (xQueueReceive(tcp_queue_out, msg_buffer, portMAX_DELAY) == pdPASS ) {
 
             LOGV("received: %s", msg_buffer);
 
@@ -159,30 +166,22 @@ void app_main(void)
                 gpio_set_level(LED_RED_GPIO, led_state);
                 led_state = !led_state;
                 strcpy(msg_buffer, "OK\n"); //copia resposta no buffer
+
             }
             else {
                 strcpy(msg_buffer, "ERRO\n"); //copia resposta no buffer
             }
 
             /* envia resposta ao socket TCP */
-            if (xQueueSendToBack(tcp_queue, msg_buffer, TCP_QUEUE_TIMEOUT) != pdPASS) {
+            if (xQueueSendToBack(tcp_queue_in, msg_buffer, TCP_QUEUE_TIMEOUT) != pdPASS) {
                 LOGE("unable to send response cmd, queue full");
             }
-            taskYIELD();
+            //taskYIELD();
         }
     }
 }
 
 /*--------- Functions ---------*/
-#if 0
-void debug_uart_setup(void)
-{
-     uart_set_baudrate(DEBUG_UART_NUM,DEBUG_UART_BAUDR);
-     uart_set_word_length(DEBUG_UART_NUM, UART_DATA_8_BITS);
-     uart_set_parity(DEBUG_UART_NUM,UART_PARITY_DISABLE);
-     uart_set_stop_bits(DEBUG_UART_NUM,UART_STOP_BITS_1);
-    }
-#endif
 
 /*--- Blink ----------*/
 void blink_task(void * message)
@@ -208,7 +207,7 @@ void tcp_server_task(void * pvParameters)
     char wifi_base_ssid[20] = "demo";
     char wifi_base_pwd[20] = "demodemo";
 
-    QueueHandle_t * queue = (QueueHandle_t *) pvParameters;
+    QueueHandle_t ** queues = (QueueHandle_t **) pvParameters;
 
     char addr_str[128];
     int addr_family = AF_INET; // address family is IPv4
@@ -267,6 +266,7 @@ void tcp_server_task(void * pvParameters)
         inet_ntoa_r(source_addr.sin_addr.s_addr, addr_str, sizeof(addr_str) - 1);
 
         LOGI("Socket accepted ip address: %s", addr_str);
+        send(sock, "Hello, there :-)\n", 17, 0);
 
         int len;
         char msg_buffer[TCP_BUFF_LEN];
@@ -296,12 +296,14 @@ void tcp_server_task(void * pvParameters)
                     LOGV("received: %s", msg_buffer);
 
                     ASSERT_ERROR("inc_msg_queue timeout",
-                                 xQueueSendToBack(queue, msg_buffer, TCP_QUEUE_TIMEOUT) == errQUEUE_FULL, abort());
+                                 xQueueSendToBack(*queues[1], msg_buffer, TCP_QUEUE_TIMEOUT) == errQUEUE_FULL, abort());
                     LOGD("message in queue");
 
-                    /*Block waiting for response*/
+                    taskYIELD();
+
+                    /* read response*/
                     ASSERT_ERROR("out_queue_timeout",
-                                 xQueueReceive(queue, msg_buffer, portMAX_DELAY) != pdPASS,
+                                 xQueueReceive(*queues[0], msg_buffer, portMAX_DELAY) != pdPASS,
                                  strcat(msg_buffer," tcp: queue timeout") );
                 }
                 LOGV("to send: '%s'", msg_buffer);
